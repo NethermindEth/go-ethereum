@@ -144,6 +144,13 @@ type newWorkReq struct {
 	timestamp int64
 }
 
+// newBlockReq represents a request for new sealing block generation with given block.
+type newBlockReq struct {
+	interrupt *atomic.Int32
+	timestamp int64
+	block     *types.Block
+}
+
 // newPayloadResult represents a result struct corresponds to payload generation.
 type newPayloadResult struct {
 	err   error
@@ -184,6 +191,7 @@ type worker struct {
 
 	// Channels
 	newWorkCh          chan *newWorkReq
+	newBlockCh         chan *newBlockReq
 	getWorkCh          chan *getWorkReq
 	taskCh             chan *task
 	resultCh           chan *types.Block
@@ -207,9 +215,6 @@ type worker struct {
 	snapshotBlock    *types.Block
 	snapshotReceipts types.Receipts
 	snapshotState    *state.StateDB
-
-	mevSnapshotBlockMu sync.RWMutex // The lock used to protect the mevSnapshotBlock below
-	mevSnapshotBlock   *types.Block
 
 	// atomic status counters
 	running atomic.Bool  // The indicator whether the consensus engine is running or not.
@@ -252,6 +257,7 @@ func newWorker(config *Config, chainConfig *params.ChainConfig, engine consensus
 		txsCh:              make(chan core.NewTxsEvent, txChanSize),
 		chainHeadCh:        make(chan core.ChainHeadEvent, chainHeadChanSize),
 		newWorkCh:          make(chan *newWorkReq),
+		newBlockCh:         make(chan *newBlockReq),
 		getWorkCh:          make(chan *getWorkReq),
 		taskCh:             make(chan *task),
 		resultCh:           make(chan *types.Block, resultQueueSize),
@@ -284,25 +290,12 @@ func newWorker(config *Config, chainConfig *params.ChainConfig, engine consensus
 	}
 	worker.newpayloadTimeout = newpayloadTimeout
 
-	worker.wg.Add(5)
+	worker.wg.Add(4)
 	go worker.mainLoop()
 	go worker.newWorkLoop(recommit)
 	go worker.resultLoop()
 	go worker.taskLoop()
 
-	// loop for requesting mev-boost for new block.
-	go worker.mevBoostLoop(worker.config.MevBoostRequestInterval)
-
-	// replace locally built block if we have a valid externally built block ready.
-	worker.newTaskHook = func(task *task) {
-		worker.mevSnapshotBlockMu.RLock()
-		// TODO: preference between mevBlock and locally built block.
-		if worker.mevSnapshotBlock != nil && worker.mevSnapshotBlock.Number().Uint64() == task.block.Number().Uint64() {
-			task.block = worker.mevSnapshotBlock
-		}
-		worker.mevSnapshotBlockMu.RUnlock()
-		log.Info("Replacing local block by mevBlock", "block", task.block)
-	}
 	// Submit first work to initialize pending state.
 	if init {
 		worker.startCh <- struct{}{}
@@ -437,11 +430,43 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 			interrupt.Store(s)
 		}
 		interrupt = new(atomic.Int32)
+
+		// Request external builder for payload.
+		pubKey := w.etherbase()
+		parent := w.chain.CurrentBlock()
+		slot := new(big.Int).Add(parent.Number, common.Big1)
+		// /eth/v1/builder/block/:slot/:parent_hash/:pubKey
+		url := fmt.Sprintf("%s/eth/v1/builder/block/%s/%s/%s",
+			w.config.MevBoostUrl, slot.String(), parent.Hash().String(), pubKey.String())
+		go func() {
+			res, err := http.Get(url)
+			if err != nil {
+				log.Error("Failed to get mev-boost response", "err", err)
+				return
+			}
+			defer res.Body.Close()
+			var response ExecutionPayloadResponse
+			json.NewDecoder(res.Body).Decode(&response)
+			block, err := response.getBlock()
+			if err != nil {
+				log.Error("Failed to parse payload", "err", err)
+				return
+			}
+
+			select {
+			case w.newBlockCh <- &newBlockReq{interrupt: interrupt,
+				block: block, timestamp: timestamp}:
+			case <-w.exitCh:
+				return
+			}
+		}()
+
 		select {
 		case w.newWorkCh <- &newWorkReq{interrupt: interrupt, timestamp: timestamp}:
 		case <-w.exitCh:
 			return
 		}
+
 		timer.Reset(recommit)
 		w.newTxs.Store(0)
 	}
@@ -525,49 +550,6 @@ func (res *ExecutionPayloadResponse) getBlock() (*types.Block, error) {
 	return engine.ExecutableDataToBlock(res.Data, nil)
 }
 
-// mevBoostLoop queries mev-boost instance for new block.
-func (w *worker) mevBoostLoop(interval time.Duration) {
-	defer w.wg.Done()
-
-	timer := time.NewTimer(0)
-	defer timer.Stop()
-	<-timer.C // discard the initial tick
-
-	request := func(slot *big.Int, parent_hash common.Hash) {
-		// /eth/v1/builder/block/:slot/:parent_hash
-		url := fmt.Sprintf("%s/eth/v1/builder/block/%s/%s",
-			w.config.MevBoostUrl, slot.String(), parent_hash.String())
-		res, err := http.Get(url)
-		if err != nil {
-			log.Error("Failed to get mev-boost response", "err", err)
-			return
-		}
-		defer res.Body.Close()
-		var response ExecutionPayloadResponse
-		json.NewDecoder(res.Body).Decode(&response)
-		block, err := response.getBlock()
-		if err != nil {
-			log.Error("Failed to parse payload", "err", err)
-			return
-		}
-		w.updateMevSnapshot(block)
-		timer.Reset(interval)
-	}
-
-	for {
-		select {
-		case <-timer.C:
-			if w.isRunning() {
-				// find the parent
-				parent := w.chain.CurrentBlock()
-				go request(parent.Number, parent.Hash())
-			}
-		case <-w.exitCh:
-			return
-		}
-	}
-}
-
 // mainLoop is responsible for generating and submitting sealing work based on
 // the received event. It can support two modes: automatically generate task and
 // submit it or return task according to given parameters for various proposes.
@@ -584,7 +566,10 @@ func (w *worker) mainLoop() {
 	for {
 		select {
 		case req := <-w.newWorkCh:
-			w.commitWork(req.interrupt, req.timestamp)
+			w.commitWork(req.interrupt, req.timestamp, nil)
+
+		case req := <-w.newBlockCh:
+			w.commitWork(req.interrupt, req.timestamp, req.block)
 
 		case req := <-w.getWorkCh:
 			block, fees, err := w.generateWork(req.params)
@@ -630,7 +615,7 @@ func (w *worker) mainLoop() {
 				// submit sealing work here since all empty submission will be rejected
 				// by clique. Of course the advance sealing(empty submission) is disabled.
 				if w.chainConfig.Clique != nil && w.chainConfig.Clique.Period == 0 {
-					w.commitWork(nil, time.Now().Unix())
+					w.commitWork(nil, time.Now().Unix(), nil)
 				}
 			}
 			w.newTxs.Add(int32(len(ev.Txs)))
@@ -805,15 +790,6 @@ func (w *worker) updateSnapshot(env *environment) {
 	w.snapshotState = env.state.Copy()
 }
 
-func (w *worker) updateMevSnapshot(block *types.Block) {
-	w.mevSnapshotBlockMu.Lock()
-	defer w.mevSnapshotBlockMu.Unlock()
-	// Update snapshot if and only if the new block received has the larger timestamp and higher block number.
-	if w.mevSnapshotBlock.Header().Time < block.Header().Time && w.mevSnapshotBlock.Header().Number.Cmp(block.Header().Number) == -1 {
-		w.mevSnapshotBlock = block
-	}
-}
-
 func (w *worker) commitTransaction(env *environment, tx *types.Transaction) ([]*types.Log, error) {
 	var (
 		snap = env.state.Snapshot()
@@ -924,6 +900,7 @@ type generateParams struct {
 	random      common.Hash       // The randomness generated by beacon chain, empty before the merge
 	withdrawals types.Withdrawals // List of withdrawals to include in block.
 	noTxs       bool              // Flag whether an empty block without any transaction is expected
+	block       *types.Block      // Optional block to process externally ordered transaction.
 }
 
 // prepareWork constructs the sealing task according to the given parameters,
@@ -994,7 +971,11 @@ func (w *worker) prepareWork(genParams *generateParams) (*environment, error) {
 // fillTransactions retrieves the pending transactions from the txpool and fills them
 // into the given sealing block. The transaction selection and ordering strategy can
 // be customized with the plugin in the future.
-func (w *worker) fillTransactions(interrupt *atomic.Int32, env *environment) error {
+func (w *worker) fillTransactions(interrupt *atomic.Int32, env *environment, block *types.Block) error {
+	// Use externally ordered transactions if available.
+	if block != nil {
+		return w.processTransactions(interrupt, env, block.Transactions())
+	}
 	// Split the pending transactions into locals and remotes
 	// Fill the block with all available pending transactions.
 	pending := w.eth.TxPool().Pending(true)
@@ -1021,6 +1002,75 @@ func (w *worker) fillTransactions(interrupt *atomic.Int32, env *environment) err
 	return nil
 }
 
+// Run externally ordered transactions.
+func (w *worker) processTransactions(interrupt *atomic.Int32, env *environment, txs types.Transactions) error {
+	gasLimit := env.header.GasLimit
+	if env.gasPool == nil {
+		env.gasPool = new(core.GasPool).AddGas(gasLimit)
+	}
+	var coalescedLogs []*types.Log
+	for _, tx := range txs {
+
+		// Check interruption signal and abort building if it's fired.
+		if interrupt != nil {
+			if signal := interrupt.Load(); signal != commitInterruptNone {
+				return signalToErr(signal)
+			}
+		}
+
+		// If we don't have enough gas for any further transactions then we're done.
+		if env.gasPool.Gas() < params.TxGas {
+			log.Trace("Not enough gas for further transactions", "have", env.gasPool, "want", params.TxGas)
+			break
+		}
+
+		// Error may be ignored here. The error has already been checked
+		// during transaction acceptance is the transaction pool.
+		from, _ := types.Sender(env.signer, tx)
+
+		if tx.Protected() && !w.chainConfig.IsEIP155(env.header.Number) {
+			log.Trace("Ignoring replay protected transaction", "hash", tx.Hash(), "eip155", w.chainConfig.EIP155Block)
+			continue
+		}
+
+		// Start executing the transaction
+		env.state.SetTxContext(tx.Hash(), env.tcount)
+		logs, err := w.commitTransaction(env, tx)
+		switch {
+		case errors.Is(err, core.ErrNonceTooLow):
+			// New head notification data race between the transaction pool and miner, shift
+			log.Trace("Skipping transaction with low nonce", "sender", from, "nonce", tx.Nonce())
+
+		case errors.Is(err, nil):
+			// Everything ok, collect the logs and shift in the next transaction from the same account
+			coalescedLogs = append(coalescedLogs, logs...)
+			env.tcount++
+
+		default:
+			// Transaction is regarded as invalid, drop all consecutive transactions from
+			// the same sender because of `nonce-too-high` clause.
+			log.Debug("Transaction failed, account skipped", "hash", tx.Hash(), "err", err)
+		}
+
+	}
+	if !w.isRunning() && len(coalescedLogs) > 0 {
+		// We don't push the pendingLogsEvent while we are sealing. The reason is that
+		// when we are sealing, the worker will regenerate a sealing block every 3 seconds.
+		// In order to avoid pushing the repeated pendingLog, we disable the pending log pushing.
+
+		// make a copy, the state caches the logs and these logs get "upgraded" from pending to mined
+		// logs by filling in the block hash when the block was mined by the local miner. This can
+		// cause a race condition if a log was "upgraded" before the PendingLogsEvent is processed.
+		cpy := make([]*types.Log, len(coalescedLogs))
+		for i, l := range coalescedLogs {
+			cpy[i] = new(types.Log)
+			*cpy[i] = *l
+		}
+		w.pendingLogsFeed.Send(cpy)
+	}
+	return nil
+}
+
 // generateWork generates a sealing block based on the given parameters.
 func (w *worker) generateWork(params *generateParams) (*types.Block, *big.Int, error) {
 	work, err := w.prepareWork(params)
@@ -1036,7 +1086,7 @@ func (w *worker) generateWork(params *generateParams) (*types.Block, *big.Int, e
 		})
 		defer timer.Stop()
 
-		err := w.fillTransactions(interrupt, work)
+		err := w.fillTransactions(interrupt, work, nil)
 		if errors.Is(err, errBlockInterruptedByTimeout) {
 			log.Warn("Block building is interrupted", "allowance", common.PrettyDuration(w.newpayloadTimeout))
 		}
@@ -1050,7 +1100,7 @@ func (w *worker) generateWork(params *generateParams) (*types.Block, *big.Int, e
 
 // commitWork generates several new sealing tasks based on the parent block
 // and submit them to the sealer.
-func (w *worker) commitWork(interrupt *atomic.Int32, timestamp int64) {
+func (w *worker) commitWork(interrupt *atomic.Int32, timestamp int64, block *types.Block) {
 	// Abort committing if node is still syncing
 	if w.syncing.Load() {
 		return
@@ -1074,7 +1124,7 @@ func (w *worker) commitWork(interrupt *atomic.Int32, timestamp int64) {
 		return
 	}
 	// Fill pending transactions from the txpool into the block.
-	err = w.fillTransactions(interrupt, work)
+	err = w.fillTransactions(interrupt, work, block)
 	switch {
 	case err == nil:
 		// The entire block is filled, decrease resubmit interval in case
