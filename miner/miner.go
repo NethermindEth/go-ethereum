@@ -52,9 +52,8 @@ type Config struct {
 	GasPrice  *big.Int       // Minimum gas price for mining a transaction
 	Recommit  time.Duration  // The time interval for miner to re-create mining work.
 
-	NewPayloadTimeout       time.Duration // The maximum time allowance for creating a new payload
-	MevBoostUrl             string        // URL to mev boost.
-	MevBoostRequestInterval time.Duration // The interval for requesting mev boost for new block
+	NewPayloadTimeout time.Duration // The maximum time allowance for creating a new payload
+	MevBoostUrl       string        // URL to mev boost.
 }
 
 // DefaultConfig contains default settings for miner.
@@ -66,9 +65,8 @@ var DefaultConfig = Config{
 	// consensus-layer usually will wait a half slot of time(6s)
 	// for payload generation. It should be enough for Geth to
 	// run 3 rounds.
-	Recommit:                2 * time.Second,
-	NewPayloadTimeout:       2 * time.Second,
-	MevBoostRequestInterval: 1 * time.Second,
+	Recommit:          2 * time.Second,
+	NewPayloadTimeout: 2 * time.Second,
 }
 
 // Miner creates blocks and searches for proof-of-work values.
