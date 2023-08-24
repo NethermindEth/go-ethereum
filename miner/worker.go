@@ -143,6 +143,11 @@ const (
 type newWorkReq struct {
 	interrupt *atomic.Int32
 	timestamp int64
+}
+
+type newBlockReq struct {
+	interrupt *atomic.Int32
+	timestamp int64
 	block     *types.Block
 }
 
@@ -186,6 +191,7 @@ type worker struct {
 
 	// Channels
 	newWorkCh          chan *newWorkReq
+	newBlockCh         chan *newBlockReq
 	getWorkCh          chan *getWorkReq
 	taskCh             chan *task
 	resultCh           chan *types.Block
@@ -250,7 +256,8 @@ func newWorker(config *Config, chainConfig *params.ChainConfig, engine consensus
 		pendingTasks:       make(map[common.Hash]*task),
 		txsCh:              make(chan core.NewTxsEvent, txChanSize),
 		chainHeadCh:        make(chan core.ChainHeadEvent, chainHeadChanSize),
-		newWorkCh:          make(chan *newWorkReq, 10),
+		newWorkCh:          make(chan *newWorkReq),
+		newBlockCh:         make(chan *newBlockReq),
 		getWorkCh:          make(chan *getWorkReq),
 		taskCh:             make(chan *task),
 		resultCh:           make(chan *types.Block, resultQueueSize),
@@ -457,8 +464,7 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 
 			select {
 			// Note: we don't want to interrupt sealing the external block. Put void interrupt here.
-			case w.newWorkCh <- &newWorkReq{interrupt: new(atomic.Int32),
-				block: block, timestamp: timestamp}:
+			case w.newBlockCh <- &newBlockReq{interrupt: new(atomic.Int32), timestamp: timestamp, block: block}:
 			case <-w.exitCh:
 				return
 			}
@@ -558,6 +564,9 @@ func (w *worker) mainLoop() {
 	for {
 		select {
 		case req := <-w.newWorkCh:
+			w.commitWork(req.interrupt, req.timestamp, nil)
+
+		case req := <-w.newBlockCh:
 			w.commitWork(req.interrupt, req.timestamp, req.block)
 
 		case req := <-w.getWorkCh:
@@ -649,7 +658,7 @@ func (w *worker) taskLoop() {
 			}
 
 			if w.hasExternalBlockPendingTask() && !task.external {
-				// If there is an external task, we prefer to keep it.
+				// If there is an task from externally built block, we prefer to keep it.
 				continue
 			}
 
