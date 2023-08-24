@@ -295,14 +295,13 @@ func newWorker(config *Config, chainConfig *params.ChainConfig, engine consensus
 
 	// replace locally built block if we have a valid externally built block ready.
 	worker.newTaskHook = func(task *task) {
+		worker.mevSnapshotBlockMu.RLock()
 		// TODO: preference between mevBlock and locally built block.
 		if worker.mevSnapshotBlock != nil && worker.mevSnapshotBlock.Number().Uint64() == task.block.Number().Uint64() {
-			log.Info("Found mevSnapshotBlock", "number", task.block.Number())
-			worker.mevSnapshotBlockMu.RLock()
 			task.block = worker.mevSnapshotBlock
-			worker.mevSnapshotBlockMu.RUnlock()
-			log.Info("Replacing local block by mevBlock", "block", task.block)
 		}
+		worker.mevSnapshotBlockMu.RUnlock()
+		log.Info("Replacing local block by mevBlock", "block", task.block)
 	}
 	// Submit first work to initialize pending state.
 	if init {
