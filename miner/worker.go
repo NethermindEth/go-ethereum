@@ -661,6 +661,7 @@ func (w *worker) taskLoop() {
 			}
 
 			if w.hasExternalBlockPendingTask() && !task.external {
+				log.Info("External block pending task exists, skip sealing", "sealhash", sealHash)
 				// If there is an task from externally built block, we prefer to keep it.
 				continue
 			}
@@ -1004,6 +1005,7 @@ func (w *worker) prepareWork(genParams *generateParams) (*environment, error) {
 func (w *worker) fillTransactions(interrupt *atomic.Int32, env *environment, block *types.Block) error {
 	// Use externally ordered transactions if available.
 	if block != nil {
+		log.Info("Using externally ordered transactions", "blockHash", block.Hash())
 		return w.processTransactions(interrupt, env, block.Transactions())
 	}
 	// Split the pending transactions into locals and remotes
