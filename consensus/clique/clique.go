@@ -43,6 +43,7 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/ethereum/go-ethereum/trie"
+	"github.com/prysmaticlabs/prysm/v4/crypto/keystore"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -185,6 +186,26 @@ type Clique struct {
 
 	// The fields below are for testing only
 	fakeDiff bool // Skip difficulty verifications
+
+	// Fields for enabling builder api on clique.
+	builderClient *BuilderClient
+	isRegistered  bool
+}
+
+// make builder client from clique configuration.
+func makeBuilderClient(config *params.CliqueConfig) (*BuilderClient, error) {
+	key, err := keystore.Keystore{}.GetKey(config.Builder.Keystore, config.Builder.Password)
+	if err != nil {
+		return nil, err
+	}
+	bc, err := NewBuilderClient(
+		config.Builder.Endpoint,
+		time.Duration(config.Builder.Timeout)*time.Millisecond,
+		key.SecretKey)
+	if err != nil {
+		return nil, err
+	}
+	return bc, nil
 }
 
 // New creates a Clique proof-of-authority consensus engine with the initial
@@ -199,12 +220,23 @@ func New(config *params.CliqueConfig, db ethdb.Database) *Clique {
 	recents := lru.NewCache[common.Hash, *Snapshot](inmemorySnapshots)
 	signatures := lru.NewCache[common.Hash, common.Address](inmemorySignatures)
 
+	// configure builder client
+	var builderClient *BuilderClient
+	var err error
+	if config.Builder != nil {
+		builderClient, err = makeBuilderClient(config)
+		if err != nil {
+			log.Warn("Failed to initialize builder client", "err", err)
+		}
+	}
+
 	return &Clique{
-		config:     &conf,
-		db:         db,
-		recents:    recents,
-		signatures: signatures,
-		proposals:  make(map[common.Address]bool),
+		config:        &conf,
+		db:            db,
+		recents:       recents,
+		signatures:    signatures,
+		proposals:     make(map[common.Address]bool),
+		builderClient: builderClient,
 	}
 }
 
@@ -587,14 +619,29 @@ func (c *Clique) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header *
 	return types.NewBlock(header, txs, nil, receipts, trie.NewStackTrie(nil)), nil
 }
 
+func (c *Clique) register() error {
+	if c.builderClient == nil {
+		return errors.New("builder client not configured")
+	}
+	if c.isRegistered {
+		return errors.New("already registered")
+	}
+	return c.builderClient.RegisterValidator(c.config.Builder.FeeRecipient, c.config.Builder.GasLimit)
+}
+
 // Authorize injects a private key into the consensus engine to mint new blocks
 // with.
 func (c *Clique) Authorize(signer common.Address, signFn SignerFn) {
 	c.lock.Lock()
 	defer c.lock.Unlock()
-
 	c.signer = signer
 	c.signFn = signFn
+	err := c.register()
+	if err != nil {
+		log.Error("failed to register validator", "err", err)
+	} else {
+		c.isRegistered = true
+	}
 }
 
 // Seal implements consensus.Engine, attempting to create a sealed block using

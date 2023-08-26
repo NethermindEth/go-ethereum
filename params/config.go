@@ -314,10 +314,21 @@ func (c *EthashConfig) String() string {
 	return "ethash"
 }
 
+// Builder API config.
+type BuilderConfig struct {
+	Keystore     string `json:"keystore"`     // BLS Keystore filepath
+	Password     string `json:"password"`     // BLS Keystore password
+	Endpoint     string `json:"builder"`      // Builder endpoint
+	Timeout      int64  `json:"timeout"`      // Builder request timeout in milliseconds
+	FeeRecipient string `json:"feeRecipient"` // Address to send fees to if builder api is available
+	GasLimit     uint64 `json:"gasLimit"`     // Gas limit for external proposers.
+}
+
 // CliqueConfig is the consensus engine configs for proof-of-authority based sealing.
 type CliqueConfig struct {
-	Period uint64 `json:"period"` // Number of seconds between blocks to enforce
-	Epoch  uint64 `json:"epoch"`  // Epoch length to reset votes and checkpoint
+	Period  uint64         `json:"period"` // Number of seconds between blocks to enforce
+	Epoch   uint64         `json:"epoch"`  // Epoch length to reset votes and checkpoint
+	Builder *BuilderConfig `json:"builderConfig,omitempty"`
 }
 
 // String implements the stringer interface, returning the consensus engine details.
