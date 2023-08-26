@@ -36,7 +36,6 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/trie"
-	"github.com/prysmaticlabs/prysm/v4/crypto/keystore"
 )
 
 const (
@@ -250,22 +249,6 @@ type worker struct {
 	resubmitHook func(time.Duration, time.Duration) // Method to call upon updating resubmitting interval.
 }
 
-// make builder client from clique configuration.
-func makeBuilderClient(keyfile, password, endpoint string, timeout time.Duration) (*BuilderClient, error) {
-	key, err := keystore.Keystore{}.GetKey(keyfile, password)
-	if err != nil {
-		return nil, err
-	}
-	bc, err := NewBuilderClient(
-		endpoint,
-		timeout,
-		key.SecretKey)
-	if err != nil {
-		return nil, err
-	}
-	return bc, nil
-}
-
 func newWorker(config *Config, chainConfig *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, isLocalBlock func(header *types.Header) bool, init bool) *worker {
 	worker := &worker{
 		config:             config,
@@ -315,7 +298,7 @@ func newWorker(config *Config, chainConfig *params.ChainConfig, engine consensus
 	worker.newpayloadTimeout = newpayloadTimeout
 
 	// make builder client
-	bc, err := makeBuilderClient(config.KeyStore, config.KeyStorePassword, config.BuilderEndpoint, recommit)
+	bc, err := NewBuilderClient(config.BuilderEndpoint, recommit, config.KeyStore, config.KeyStorePassword)
 	if err != nil {
 		log.Warn("Failed to initialize builder client", "err", err)
 	}
