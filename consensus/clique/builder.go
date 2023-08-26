@@ -71,6 +71,11 @@ type ExecutionPayloadResponse struct {
 	Data    engine.ExecutableData `json:"data"`
 }
 
+type GetHeaderResponse struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
 func (res *ExecutionPayloadResponse) getBlock() (*types.Block, error) {
 	return engine.ExecutableDataToBlock(res.Data, nil)
 }
@@ -102,6 +107,26 @@ func (bc *BuilderClient) RegisterValidator(feeRecipient string, gasLimit uint64)
 	_, err = bc.hc.Post(url.String(), "application/json", bytes.NewBuffer(body))
 	if err != nil {
 		return err
+	}
+	return nil
+}
+
+func (bc *BuilderClient) GetHeader(slot uint64, parentHash common.Hash) error {
+	part := fmt.Sprintf("/eth/v1/builder/header/%d/%s/%s", slot, parentHash.Hex(), hexutil.Encode(bc.blsKey.PublicKey().Marshal()))
+	url := bc.baseURL.JoinPath(part)
+	resp, err := bc.hc.Get(url.String())
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	var response GetHeaderResponse
+	decoder := json.NewDecoder(resp.Body)
+	err = decoder.Decode(&response)
+	if err != nil {
+		return err
+	}
+	if response.Code != 200 {
+		return errors.New(response.Message)
 	}
 	return nil
 }
