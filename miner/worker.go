@@ -17,16 +17,13 @@
 package miner
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
-	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/ethereum/go-ethereum/beacon/engine"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip1559"
@@ -39,6 +36,7 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/trie"
+	"github.com/prysmaticlabs/prysm/v4/crypto/keystore"
 )
 
 const (
@@ -229,6 +227,8 @@ type worker struct {
 	newTxs  atomic.Int32 // New arrival transaction count since last sealing work submitting.
 	syncing atomic.Bool  // The indicator whether the node is still syncing.
 
+	builderClient *BuilderClient
+
 	// newpayloadTimeout is the maximum timeout allowance for creating payload.
 	// The default value is 2 seconds but node operator can set it to arbitrary
 	// large value. A large timeout allowance may cause Geth to fail creating
@@ -248,6 +248,22 @@ type worker struct {
 	skipSealHook func(*task) bool                   // Method to decide whether skipping the sealing.
 	fullTaskHook func()                             // Method to call before pushing the full sealing task.
 	resubmitHook func(time.Duration, time.Duration) // Method to call upon updating resubmitting interval.
+}
+
+// make builder client from clique configuration.
+func makeBuilderClient(keyfile, password, endpoint string, timeout time.Duration) (*BuilderClient, error) {
+	key, err := keystore.Keystore{}.GetKey(keyfile, password)
+	if err != nil {
+		return nil, err
+	}
+	bc, err := NewBuilderClient(
+		endpoint,
+		timeout,
+		key.SecretKey)
+	if err != nil {
+		return nil, err
+	}
+	return bc, nil
 }
 
 func newWorker(config *Config, chainConfig *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, isLocalBlock func(header *types.Header) bool, init bool) *worker {
@@ -298,9 +314,27 @@ func newWorker(config *Config, chainConfig *params.ChainConfig, engine consensus
 	}
 	worker.newpayloadTimeout = newpayloadTimeout
 
-	worker.wg.Add(4)
+	// make builder client
+	bc, err := makeBuilderClient(config.KeyStore, config.KeyStorePassword, config.BuilderEndpoint, recommit)
+	if err != nil {
+		log.Warn("Failed to initialize builder client", "err", err)
+	}
+	if bc != nil {
+		log.Info("Builder client created", "endpoint", config.BuilderEndpoint)
+		log.Info("Registering builder.")
+		err := bc.RegisterValidator(config.Etherbase.Hex(), config.GasCeil)
+		if err != nil {
+			log.Warn("Failed to register validator", "err", err)
+		} else {
+			log.Info("Validator registered", "err")
+			worker.builderClient = bc
+		}
+	}
+
+	worker.wg.Add(5)
 	go worker.mainLoop()
 	go worker.newWorkLoop(recommit)
+	go worker.newBlockLoop()
 	go worker.resultLoop()
 	go worker.taskLoop()
 
@@ -419,22 +453,14 @@ func recalcRecommit(minRecommit, prev time.Duration, target float64, inc bool) t
 	return time.Duration(int64(next))
 }
 
-type ExecutionPayloadResponse struct {
-	Version string                `json:"version"`
-	Data    engine.ExecutableData `json:"data"`
-}
-
-func (res *ExecutionPayloadResponse) getBlock() (*types.Block, error) {
-	return engine.ExecutableDataToBlock(res.Data, nil)
-}
-
 // newWorkLoop is a standalone goroutine to submit new sealing work upon received events.
 func (w *worker) newWorkLoop(recommit time.Duration) {
 	defer w.wg.Done()
 	var (
-		interrupt   *atomic.Int32
-		minRecommit = recommit // minimal resubmit interval specified by user.
-		timestamp   int64      // timestamp for each round of sealing.
+		interrupt        *atomic.Int32
+		builderInterrupt *atomic.Int32
+		minRecommit      = recommit // minimal resubmit interval specified by user.
+		timestamp        int64      // timestamp for each round of sealing.
 	)
 
 	timer := time.NewTimer(0)
@@ -447,36 +473,6 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 			interrupt.Store(s)
 		}
 		interrupt = new(atomic.Int32)
-
-		// Request mev-boost for latest payload.
-		pubKey := w.etherbase()
-		parent := w.chain.CurrentBlock()
-		slot := new(big.Int).Add(parent.Number, common.Big1)
-		// /eth/v1/builder/block/:slot/:parent_hash/:pubKey
-		url := fmt.Sprintf("%s/eth/v1/builder/block/%s/%s/%s",
-			w.config.MevBoostUrl, slot.String(), parent.Hash().String(), pubKey.String())
-		go func() {
-			res, err := http.Get(url)
-			if err != nil {
-				log.Error("Failed to get mev-boost response", "err", err)
-				return
-			}
-			defer res.Body.Close()
-			var response ExecutionPayloadResponse
-			json.NewDecoder(res.Body).Decode(&response)
-			block, err := response.getBlock()
-			if err != nil {
-				log.Error("Failed to parse payload", "err", err)
-				return
-			}
-
-			select {
-			// Note: we don't want to interrupt sealing the external block. Put void interrupt here.
-			case w.newBlockCh <- &newBlockReq{interrupt: new(atomic.Int32), timestamp: timestamp, block: block}:
-			case <-w.exitCh:
-				return
-			}
-		}()
 		select {
 		case w.newWorkCh <- &newWorkReq{interrupt: interrupt, timestamp: timestamp}:
 		case <-w.exitCh:
@@ -496,17 +492,43 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 		w.pendingMu.Unlock()
 	}
 
+	commitBuilder := func(s int32) {
+		if builderInterrupt != nil {
+			builderInterrupt.Store(s)
+		}
+		builderInterrupt = new(atomic.Int32)
+
+		if w.builderClient == nil {
+			return
+		}
+
+		parent := w.chain.CurrentBlock()
+		block, err := w.builderClient.GetBlock(parent.Number.Uint64()+1, parent.Hash())
+		if err != nil {
+			log.Error("failed to get block from builder", "err", err)
+			return
+		}
+		select {
+		// Note: we don't want to interrupt sealing the external block. Put void interrupt here.
+		case w.newBlockCh <- &newBlockReq{interrupt: builderInterrupt, timestamp: timestamp, block: block}:
+		case <-w.exitCh:
+			return
+		}
+	}
+
 	for {
 		select {
 		case <-w.startCh:
 			clearPending(w.chain.CurrentBlock().Number.Uint64())
 			timestamp = time.Now().Unix()
 			commit(commitInterruptNewHead)
+			go commitBuilder(commitInterruptNewHead)
 
 		case head := <-w.chainHeadCh:
 			clearPending(head.Block.NumberU64())
 			timestamp = time.Now().Unix()
 			commit(commitInterruptNewHead)
+			go commitBuilder(commitInterruptNewHead)
 
 		case <-timer.C:
 			// If sealing is running resubmit a new work cycle periodically to pull in
@@ -518,6 +540,8 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 					continue
 				}
 				commit(commitInterruptResubmit)
+				// Note: We do not interrupt already running block building for resubmit event.
+				go commitBuilder(commitInterruptNone)
 			}
 
 		case interval := <-w.resubmitIntervalCh:
@@ -556,6 +580,20 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 	}
 }
 
+// builderLoop is response for generating sealing work based on the received block from builder.
+// We do define another loop to prevent any race between local block and remote blocks.
+func (w *worker) newBlockLoop() {
+	defer w.wg.Done()
+	for {
+		select {
+		case req := <-w.newBlockCh:
+			w.commitWork(req.interrupt, req.timestamp, req.block)
+		case <-w.exitCh:
+			return
+		}
+	}
+}
+
 // mainLoop is responsible for generating and submitting sealing work based on
 // the received event. It can support two modes: automatically generate task and
 // submit it or return task according to given parameters for various proposes.
@@ -573,9 +611,6 @@ func (w *worker) mainLoop() {
 		select {
 		case req := <-w.newWorkCh:
 			w.commitWork(req.interrupt, req.timestamp, nil)
-
-		case req := <-w.newBlockCh:
-			w.commitWork(req.interrupt, req.timestamp, req.block)
 
 		case req := <-w.getWorkCh:
 			req.result <- w.generateWork(req.params)
