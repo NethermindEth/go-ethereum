@@ -130,11 +130,11 @@ func (env *environment) discard() {
 
 // task contains all information for consensus engine sealing and result submitting.
 type task struct {
-	receipts  []*types.Receipt
-	state     *state.StateDB
-	block     *types.Block
-	createdAt time.Time
-	external  bool
+	receipts    []*types.Receipt
+	state       *state.StateDB
+	block       *types.Block
+	createdAt   time.Time
+	fromBuilder bool
 }
 
 const (
@@ -333,8 +333,8 @@ func newWorker(config *Config, chainConfig *params.ChainConfig, engine consensus
 
 	worker.wg.Add(5)
 	go worker.mainLoop()
-	go worker.newWorkLoop(recommit)
 	go worker.newBlockLoop()
+	go worker.newWorkLoop(recommit)
 	go worker.resultLoop()
 	go worker.taskLoop()
 
@@ -695,9 +695,9 @@ func (w *worker) taskLoop() {
 				continue
 			}
 
-			if w.hasExternalBlockPendingTask() && !task.external {
-				log.Info("External block pending task exists, skip sealing", "sealhash", sealHash)
+			if w.hasExternalBlockPendingTask() && !task.fromBuilder {
 				// If there is an task from externally built block, we prefer to keep it.
+				log.Info("External block pending task exists, skip sealing local block", "sealhash", sealHash)
 				continue
 			}
 
@@ -1256,7 +1256,7 @@ func (w *worker) commit(env *environment, interval func(), update bool, start ti
 		// If we're post merge, just ignore
 		if !w.isTTDReached(block.Header()) {
 			select {
-			case w.taskCh <- &task{receipts: env.receipts, state: env.state, block: block, createdAt: time.Now(), external: external}:
+			case w.taskCh <- &task{receipts: env.receipts, state: env.state, block: block, createdAt: time.Now(), fromBuilder: external}:
 				fees := totalFees(block, env.receipts)
 				feesInEther := new(big.Float).Quo(new(big.Float).SetInt(fees), big.NewFloat(params.Ether))
 				log.Info("Commit new sealing work", "number", block.Number(), "sealhash", w.engine.SealHash(block.Header()),
@@ -1302,7 +1302,7 @@ func (w *worker) hasExternalBlockPendingTask() bool {
 	w.pendingMu.RLock()
 	defer w.pendingMu.RUnlock()
 	for _, task := range w.pendingTasks {
-		if task.external {
+		if task.fromBuilder {
 			return true
 		}
 	}
