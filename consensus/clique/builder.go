@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -14,12 +15,15 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/prysmaticlabs/prysm/shared/bls"
+	"github.com/prysmaticlabs/prysm/v4/crypto/bls"
 )
+
+type BlsSignerFn func(bytes []byte) bls.Signature
 
 type BuilderClient struct {
 	hc      *http.Client
 	baseURL *url.URL
+	blsKey  bls.SecretKey
 }
 
 func urlForHost(h string) (*url.URL, error) {
@@ -36,7 +40,7 @@ func urlForHost(h string) (*url.URL, error) {
 	return &url.URL{Host: net.JoinHostPort(host, port), Scheme: "http"}, nil
 }
 
-func NewBuilderClient(host string, timeout time.Duration) (*BuilderClient, error) {
+func NewBuilderClient(host string, timeout time.Duration, blsKey bls.SecretKey) (*BuilderClient, error) {
 	u, err := urlForHost(host)
 	if err != nil {
 		return nil, err
@@ -46,19 +50,20 @@ func NewBuilderClient(host string, timeout time.Duration) (*BuilderClient, error
 	return &BuilderClient{
 		hc:      hc,
 		baseURL: u,
+		blsKey:  blsKey,
 	}, nil
 }
 
 type ValidatorRegistration struct {
-	FeeRecipient hexutil.Bytes `json:"fee_recipient"`
-	GasLimit     string        `json:"gas_limit"`
-	Timestamp    string        `json:"timestamp"`
-	Pubkey       hexutil.Bytes `json:"pubkey"`
+	FeeRecipient string `json:"fee_recipient"`
+	GasLimit     string `json:"gas_limit"`
+	Timestamp    string `json:"timestamp"`
+	Pubkey       string `json:"pubkey"`
 }
 
 type SignedValidatorRegistration struct {
 	Message   ValidatorRegistration `json:"message"`
-	Signature hexutil.Bytes         `json:"signature"`
+	Signature string                `json:"signature"`
 }
 
 type ExecutionPayloadResponse struct {
@@ -70,14 +75,15 @@ func (res *ExecutionPayloadResponse) getBlock() (*types.Block, error) {
 	return engine.ExecutableDataToBlock(res.Data, nil)
 }
 
-func (bc *BuilderClient) RegisterValidator(secretKey bls.SecretKey, feeRecipient hexutil.Bytes, gasLimit, timestamp string) error {
+func (bc *BuilderClient) RegisterValidator(feeRecipient string, gasLimit uint64) error {
 	url := bc.baseURL.JoinPath("/eth/v1/builder/validators")
 	regMsg := ValidatorRegistration{
 		FeeRecipient: feeRecipient,
-		GasLimit:     gasLimit,
-		Timestamp:    timestamp,
-		Pubkey:       secretKey.PublicKey().Marshal(),
+		GasLimit:     strconv.FormatUint(gasLimit, 10),
+		Timestamp:    strconv.FormatInt(time.Now().Unix(), 10),
+		Pubkey:       hexutil.Encode(bc.blsKey.PublicKey().Marshal()),
 	}
+
 	msg, err := json.Marshal(regMsg)
 	if err != nil {
 		return err
@@ -85,7 +91,7 @@ func (bc *BuilderClient) RegisterValidator(secretKey bls.SecretKey, feeRecipient
 
 	signedReg := &SignedValidatorRegistration{
 		Message:   regMsg,
-		Signature: secretKey.Sign(msg).Marshal(),
+		Signature: hexutil.Encode(bc.blsKey.Sign(msg).Marshal()),
 	}
 
 	body, err := json.Marshal(signedReg)
@@ -94,19 +100,16 @@ func (bc *BuilderClient) RegisterValidator(secretKey bls.SecretKey, feeRecipient
 	}
 
 	_, err = bc.hc.Post(url.String(), "application/json", bytes.NewBuffer(body))
-
 	if err != nil {
 		return err
 	}
 	return nil
 }
 
-func (bc *BuilderClient) GetBlock(slot uint64, parentHash common.Hash, pubKey bls.PublicKey) (*types.Block, error) {
+func (bc *BuilderClient) GetBlock(slot uint64, parentHash common.Hash) (*types.Block, error) {
 	// /eth/v1/builder/block/:slot/:parent_hash/:pubkey
-	url := bc.baseURL.JoinPath("/eth/v1/builder/block",
-		strconv.FormatUint(slot, 10),
-		parentHash.Hex(),
-		common.Bytes2Hex(pubKey.Marshal()))
+	part := fmt.Sprintf("/eth/v1/builder/block/%d/%s/%s", slot, parentHash.Hex(), hexutil.Encode(bc.blsKey.PublicKey().Marshal()))
+	url := bc.baseURL.JoinPath(part)
 	resp, err := bc.hc.Get(url.String())
 	if err != nil {
 		return nil, err
