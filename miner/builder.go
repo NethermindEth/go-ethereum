@@ -15,11 +15,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/prysmaticlabs/prysm/v4/crypto/bls"
 	"github.com/prysmaticlabs/prysm/v4/crypto/keystore"
 )
-
-type BlsSignerFn func(bytes []byte) bls.Signature
 
 type BuilderClient struct {
 	hc      *http.Client
