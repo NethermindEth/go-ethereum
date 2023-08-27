@@ -80,7 +80,7 @@ type GetHeaderResponse struct {
 }
 
 func (res *ExecutionPayloadResponse) getBlock() (*types.Block, error) {
-	return engine.ExecutableDataToBlock(res.Data, nil)
+	return engine.ExecutableDataToBlock(res.Data, nil, nil)
 }
 
 func (bc *BuilderClient) RegisterValidator(feeRecipient string, gasLimit uint64) error {
