@@ -102,7 +102,7 @@ func createRegistration(feeRecipient string, gasLimit uint64, key *keystore.Key)
 	}
 
 	// https://github.com/ethereum/builder-specs/blob/main/specs/bellatrix/builder.md#domain-types
-	domain := ssz.ComputeDomain(phase0.DomainType{0x01, 0x00, 0x00, 0x00}, phase0.Version{}, phase0.Root{})
+	domain := ssz.ComputeDomain(phase0.DomainType{0x00, 0x00, 0x00, 0x01}, phase0.Version{}, phase0.Root{})
 	signature, err := ssz.SignMessage(message, domain, sk)
 	if err != nil {
 		return nil, err
