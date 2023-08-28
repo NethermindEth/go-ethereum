@@ -8,13 +8,17 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"strconv"
 	"time"
 
+	builderApiV1 "github.com/attestantio/go-builder-client/api/v1"
+	"github.com/attestantio/go-eth2-client/spec/bellatrix"
+	"github.com/attestantio/go-eth2-client/spec/phase0"
 	"github.com/ethereum/go-ethereum/beacon/engine"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/flashbots/go-boost-utils/bls"
+	"github.com/flashbots/go-boost-utils/ssz"
 	"github.com/prysmaticlabs/prysm/v4/crypto/keystore"
 )
 
@@ -57,18 +61,6 @@ func NewBuilderClient(host string, timeout time.Duration, keyfile, password stri
 	}, nil
 }
 
-type ValidatorRegistration struct {
-	FeeRecipient string `json:"fee_recipient"`
-	GasLimit     string `json:"gas_limit"`
-	Timestamp    string `json:"timestamp"`
-	Pubkey       string `json:"pubkey"`
-}
-
-type SignedValidatorRegistration struct {
-	Message   ValidatorRegistration `json:"message"`
-	Signature string                `json:"signature"`
-}
-
 type ExecutionPayloadResponse struct {
 	Version string                `json:"version"`
 	Data    engine.ExecutableData `json:"data"`
@@ -83,30 +75,60 @@ func (res *ExecutionPayloadResponse) getBlock() (*types.Block, error) {
 	return engine.ExecutableDataToBlock(res.Data, nil, nil)
 }
 
+func createRegistration(feeRecipient string, gasLimit uint64, key *keystore.Key) (*builderApiV1.SignedValidatorRegistration, error) {
+	decoded, err := hexutil.Decode(feeRecipient)
+	if err != nil {
+		return nil, err
+	}
+	address := bellatrix.ExecutionAddress{}
+	n := copy(address[:], decoded)
+	if n != 20 {
+		return nil, errors.New("invalid fee recipient")
+	}
+
+	pubkey := phase0.BLSPubKey{}
+	copy(pubkey[:], key.PublicKey.Marshal())
+
+	message := &builderApiV1.ValidatorRegistration{
+		FeeRecipient: address,
+		GasLimit:     gasLimit,
+		Timestamp:    time.Now(),
+		Pubkey:       pubkey,
+	}
+
+	sk, err := bls.SecretKeyFromBytes(key.SecretKey.Marshal())
+	if err != nil {
+		return nil, err
+	}
+
+	// https://github.com/ethereum/builder-specs/blob/main/specs/bellatrix/builder.md#domain-types
+	domain := ssz.ComputeDomain(phase0.DomainType{0x01, 0x00, 0x00, 0x00}, phase0.Version{}, phase0.Root{})
+	signature, err := ssz.SignMessage(message, domain, sk)
+	if err != nil {
+		return nil, err
+	}
+
+	signed := &builderApiV1.SignedValidatorRegistration{
+		Message:   message,
+		Signature: signature,
+	}
+
+	return signed, nil
+}
+
 func (bc *BuilderClient) RegisterValidator(feeRecipient string, gasLimit uint64) error {
+	signedReg, err := createRegistration(feeRecipient, gasLimit, bc.key)
+	if err != nil {
+		return err
+	}
+
+	payload := []*builderApiV1.SignedValidatorRegistration{signedReg}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
 	url := bc.baseURL.JoinPath("/eth/v1/builder/validators")
-	regMsg := ValidatorRegistration{
-		FeeRecipient: feeRecipient,
-		GasLimit:     strconv.FormatUint(gasLimit, 10),
-		Timestamp:    strconv.FormatInt(time.Now().Unix(), 10),
-		Pubkey:       hexutil.Encode(bc.key.PublicKey.Marshal()),
-	}
-
-	msg, err := json.Marshal(regMsg)
-	if err != nil {
-		return err
-	}
-
-	signedReg := &SignedValidatorRegistration{
-		Message:   regMsg,
-		Signature: hexutil.Encode(bc.key.SecretKey.Sign(msg).Marshal()),
-	}
-
-	body, err := json.Marshal(signedReg)
-	if err != nil {
-		return err
-	}
-
 	_, err = bc.hc.Post(url.String(), "application/json", bytes.NewBuffer(body))
 	if err != nil {
 		return err
