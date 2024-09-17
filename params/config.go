@@ -58,6 +58,7 @@ var (
 		TerminalTotalDifficultyPassed: true,
 		ShanghaiTime:                  newUint64(1681338455),
 		CancunTime:                    newUint64(1710338135),
+		R0Time:                        nil, // [r-geth] to enable R0 fork update this
 		DepositContractAddress:        common.HexToAddress("0x00000000219ab540356cbb839cbe05303d7705fa"),
 		Ethash:                        new(EthashConfig),
 	}
@@ -135,6 +136,7 @@ var (
 		CancunTime:                    nil,
 		PragueTime:                    nil,
 		VerkleTime:                    nil,
+		R0Time:                        nil,
 		TerminalTotalDifficulty:       nil,
 		TerminalTotalDifficultyPassed: true,
 		Ethash:                        new(EthashConfig),
@@ -186,6 +188,7 @@ var (
 		CancunTime:                    nil,
 		PragueTime:                    nil,
 		VerkleTime:                    nil,
+		R0Time:                        nil,
 		TerminalTotalDifficulty:       nil,
 		TerminalTotalDifficultyPassed: false,
 		Ethash:                        nil,
@@ -216,6 +219,7 @@ var (
 		CancunTime:                    nil,
 		PragueTime:                    nil,
 		VerkleTime:                    nil,
+		R0Time:                        nil,
 		TerminalTotalDifficulty:       nil,
 		TerminalTotalDifficultyPassed: false,
 		Ethash:                        new(EthashConfig),
@@ -246,6 +250,7 @@ var (
 		CancunTime:                    newUint64(0),
 		PragueTime:                    nil,
 		VerkleTime:                    nil,
+		R0Time:                        nil,
 		TerminalTotalDifficulty:       big.NewInt(0),
 		TerminalTotalDifficultyPassed: true,
 		Ethash:                        new(EthashConfig),
@@ -276,6 +281,7 @@ var (
 		CancunTime:                    nil,
 		PragueTime:                    nil,
 		VerkleTime:                    nil,
+		R0Time:                        nil,
 		TerminalTotalDifficulty:       nil,
 		TerminalTotalDifficultyPassed: false,
 		Ethash:                        new(EthashConfig),
@@ -326,6 +332,7 @@ type ChainConfig struct {
 	CancunTime   *uint64 `json:"cancunTime,omitempty"`   // Cancun switch time (nil = no fork, 0 = already on cancun)
 	PragueTime   *uint64 `json:"pragueTime,omitempty"`   // Prague switch time (nil = no fork, 0 = already on prague)
 	VerkleTime   *uint64 `json:"verkleTime,omitempty"`   // Verkle switch time (nil = no fork, 0 = already on verkle)
+	R0Time       *uint64 `json:"r0Time,omitempty"`       // R0 switch time (nil = no fork, 0 = already on r0)
 
 	// TerminalTotalDifficulty is the amount of total difficulty reached by
 	// the network that triggers the consensus upgrade.
@@ -453,6 +460,11 @@ func (c *ChainConfig) Description() string {
 	if c.VerkleTime != nil {
 		banner += fmt.Sprintf(" - Verkle:                      @%-10v\n", *c.VerkleTime)
 	}
+
+	if c.R0Time != nil {
+		banner += fmt.Sprintf(" - R0:                          @%-10v\n", *c.R0Time)
+	}
+
 	return banner
 }
 
@@ -561,6 +573,11 @@ func (c *ChainConfig) IsEIP4762(num *big.Int, time uint64) bool {
 	return c.IsVerkle(num, time)
 }
 
+// IsR0 returns wether time is either equal to the R0 fork time or greater
+func (c *ChainConfig) IsR0(time uint64) bool {
+	return isTimestampForked(c.R0Time, time)
+}
+
 // CheckCompatible checks whether scheduled fork transitions have been imported
 // with a mismatching chain configuration.
 func (c *ChainConfig) CheckCompatible(newcfg *ChainConfig, height uint64, time uint64) *ConfigCompatError {
@@ -616,6 +633,7 @@ func (c *ChainConfig) CheckConfigForkOrder() error {
 		{name: "cancunTime", timestamp: c.CancunTime, optional: true},
 		{name: "pragueTime", timestamp: c.PragueTime, optional: true},
 		{name: "verkleTime", timestamp: c.VerkleTime, optional: true},
+		{name: "r0Time", timestamp: c.R0Time, optional: true},
 	} {
 		if lastFork.name != "" {
 			switch {
@@ -722,6 +740,10 @@ func (c *ChainConfig) checkCompatible(newcfg *ChainConfig, headNumber *big.Int, 
 	if isForkTimestampIncompatible(c.VerkleTime, newcfg.VerkleTime, headTimestamp) {
 		return newTimestampCompatError("Verkle fork timestamp", c.VerkleTime, newcfg.VerkleTime)
 	}
+	if isForkTimestampIncompatible(c.R0Time, newcfg.R0Time, headTimestamp) {
+		return newTimestampCompatError("R0 fork timestamp", c.R0Time, newcfg.R0Time)
+	}
+
 	return nil
 }
 
@@ -747,6 +769,8 @@ func (c *ChainConfig) LatestFork(time uint64) forks.Fork {
 		return forks.Cancun
 	case c.IsShanghai(london, time):
 		return forks.Shanghai
+	case c.IsR0(time):
+		return forks.R0
 	default:
 		return forks.Paris
 	}
@@ -894,6 +918,7 @@ type Rules struct {
 	IsBerlin, IsLondon                                      bool
 	IsMerge, IsShanghai, IsCancun, IsPrague                 bool
 	IsVerkle                                                bool
+	IsR0                                                    bool
 }
 
 // Rules ensures c's ChainID is not nil.
@@ -924,5 +949,6 @@ func (c *ChainConfig) Rules(num *big.Int, isMerge bool, timestamp uint64) Rules 
 		IsPrague:         isMerge && c.IsPrague(num, timestamp),
 		IsVerkle:         isVerkle,
 		IsEIP4762:        isVerkle,
+		IsR0:             c.IsR0(timestamp),
 	}
 }
