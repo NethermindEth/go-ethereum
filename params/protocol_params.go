@@ -176,6 +176,8 @@ const (
 	MaxBlobGasPerBlock          = 6 * BlobTxBlobGasPerBlob // Maximum consumable blob gas for data blobs per block
 
 	HistoryServeWindow = 8192 // Number of blocks to serve historical block hashes for, EIP-2935.
+
+	EcMulmuladdGas = 3500
 )
 
 // Gas discount table for BLS12-381 G1 and G2 multi exponentiation operations

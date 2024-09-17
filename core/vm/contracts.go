@@ -24,6 +24,7 @@ import (
 	"maps"
 	"math/big"
 
+	"github.com/NethermindEth/weierstrass"
 	"github.com/consensys/gnark-crypto/ecc"
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fp"
@@ -143,7 +144,32 @@ var PrecompiledContractsBLS = PrecompiledContractsPrague
 
 var PrecompiledContractsVerkle = PrecompiledContractsPrague
 
+var PrecompiledContractsR0 = map[common.Address]PrecompiledContract{
+	common.BytesToAddress([]byte{0x01}): &ecrecover{},
+	common.BytesToAddress([]byte{0x02}): &sha256hash{},
+	common.BytesToAddress([]byte{0x03}): &ripemd160hash{},
+	common.BytesToAddress([]byte{0x04}): &dataCopy{},
+	common.BytesToAddress([]byte{0x05}): &bigModExp{eip2565: true},
+	common.BytesToAddress([]byte{0x06}): &bn256AddIstanbul{},
+	common.BytesToAddress([]byte{0x07}): &bn256ScalarMulIstanbul{},
+	common.BytesToAddress([]byte{0x08}): &bn256PairingIstanbul{},
+	common.BytesToAddress([]byte{0x09}): &blake2F{},
+	common.BytesToAddress([]byte{0x0a}): &kzgPointEvaluation{},
+	common.BytesToAddress([]byte{0x0b}): &bls12381G1Add{},
+	common.BytesToAddress([]byte{0x0c}): &bls12381G1Mul{},
+	common.BytesToAddress([]byte{0x0d}): &bls12381G1MultiExp{},
+	common.BytesToAddress([]byte{0x0e}): &bls12381G2Add{},
+	common.BytesToAddress([]byte{0x0f}): &bls12381G2Mul{},
+	common.BytesToAddress([]byte{0x10}): &bls12381G2MultiExp{},
+	common.BytesToAddress([]byte{0x11}): &bls12381Pairing{},
+	common.BytesToAddress([]byte{0x12}): &bls12381MapG1{},
+	common.BytesToAddress([]byte{0x13}): &bls12381MapG2{},
+
+	common.BytesToAddress([]byte{0x01, 0x01}): &ecMulmuladd{},
+}
+
 var (
+	PrecompiledAddressesR0        []common.Address
 	PrecompiledAddressesPrague    []common.Address
 	PrecompiledAddressesCancun    []common.Address
 	PrecompiledAddressesBerlin    []common.Address
@@ -171,10 +197,16 @@ func init() {
 	for k := range PrecompiledContractsPrague {
 		PrecompiledAddressesPrague = append(PrecompiledAddressesPrague, k)
 	}
+
+	for k := range PrecompiledContractsR0 {
+		PrecompiledAddressesR0 = append(PrecompiledAddressesPrague, k)
+	}
 }
 
 func activePrecompiledContracts(rules params.Rules) PrecompiledContracts {
 	switch {
+	case rules.IsR0:
+		return PrecompiledContractsR0
 	case rules.IsVerkle:
 		return PrecompiledContractsVerkle
 	case rules.IsPrague:
@@ -200,6 +232,8 @@ func ActivePrecompiledContracts(rules params.Rules) PrecompiledContracts {
 // ActivePrecompiles returns the precompile addresses enabled with the current configuration.
 func ActivePrecompiles(rules params.Rules) []common.Address {
 	switch {
+	case rules.IsR0:
+		return PrecompiledAddressesR0
 	case rules.IsPrague:
 		return PrecompiledAddressesPrague
 	case rules.IsCancun:
@@ -281,6 +315,7 @@ type sha256hash struct{}
 func (c *sha256hash) RequiredGas(input []byte) uint64 {
 	return uint64(len(input)+31)/32*params.Sha256PerWordGas + params.Sha256BaseGas
 }
+
 func (c *sha256hash) Run(input []byte) ([]byte, error) {
 	h := sha256.Sum256(input)
 	return h[:], nil
@@ -296,6 +331,7 @@ type ripemd160hash struct{}
 func (c *ripemd160hash) RequiredGas(input []byte) uint64 {
 	return uint64(len(input)+31)/32*params.Ripemd160PerWordGas + params.Ripemd160BaseGas
 }
+
 func (c *ripemd160hash) Run(input []byte) ([]byte, error) {
 	ripemd := ripemd160.New()
 	ripemd.Write(input)
@@ -312,6 +348,7 @@ type dataCopy struct{}
 func (c *dataCopy) RequiredGas(input []byte) uint64 {
 	return uint64(len(input)+31)/32*params.IdentityPerWordGas + params.IdentityBaseGas
 }
+
 func (c *dataCopy) Run(in []byte) ([]byte, error) {
 	return common.CopyBytes(in), nil
 }
@@ -461,7 +498,7 @@ func (c *bigModExp) Run(input []byte) ([]byte, error) {
 		// Modulo 0 is undefined, return zero
 		return common.LeftPadBytes([]byte{}, int(modLen)), nil
 	case base.BitLen() == 1: // a bit length of 1 means it's 1 (or -1).
-		//If base == 1, then we can just return base % mod (if mod >= 1, which it is)
+		// If base == 1, then we can just return base % mod (if mod >= 1, which it is)
 		v = base.Mod(base, mod).Bytes()
 	default:
 		v = base.Exp(base, exp, mod).Bytes()
@@ -1250,4 +1287,59 @@ func kZGToVersionedHash(kzg kzg4844.Commitment) common.Hash {
 	h[0] = blobCommitmentVersionKZG
 
 	return h
+}
+
+type ecMulmuladd struct{}
+
+const ecMulmuladdInputLength = 224
+
+// RequiredGas returns the gas required to execute the precompiled contract
+func (c *ecMulmuladd) RequiredGas(input []byte) uint64 {
+	return params.EcMulmuladdGas
+}
+
+func (c *ecMulmuladd) Run(input []byte) ([]byte, error) {
+	if len(input) != ecMulmuladdInputLength {
+		return nil, fmt.Errorf("ecMulmuladd input invalid length, expected %d, got %d", ecMulmuladdInputLength, len(input))
+	}
+
+	p := new(big.Int).SetBytes(input[0:32])     // mod p (prime field size)
+	a := new(big.Int).SetBytes(input[32:64])    // curve first coefficient ()
+	b := new(big.Int).SetBytes(input[64:96])    // curve second coefficient
+	px := new(big.Int).SetBytes(input[96:128])  // point P x coordinate
+	py := new(big.Int).SetBytes(input[128:160]) // point P y coordinate
+	qx := new(big.Int).SetBytes(input[160:192]) // point Q x coordinate
+	qy := new(big.Int).SetBytes(input[192:224]) // point Q y coordinate
+	u := new(big.Int).SetBytes(input[224:256])  // scalar multiplier u
+	v := new(big.Int).SetBytes(input[256:288])  // scalar multiplier v
+
+	curve := crypto.NewCurve(a, b, p)
+
+	var (
+		pPoint *weierstrass.Point
+		qPoint *weierstrass.Point
+		err    error
+	)
+
+	if pPoint, err = crypto.NewPoint(px, py, curve); err != nil {
+		return nil, err
+	}
+
+	if qPoint, err = crypto.NewPoint(qx, qy, curve); err != nil {
+		return nil, err
+	}
+
+	r := crypto.MulAdd(*pPoint, *qPoint, u, v, curve)
+	// Per specs point at infinity is represented as (0,0)
+	if r.IsInf() {
+		return common.LeftPadBytes([]byte{0}, 64), nil
+	}
+
+	out := make([]byte, 64)
+
+	// TODO: better error handling
+	copy(out[0:32], r.X().FillBytes(make([]byte, 32)))
+	copy(out[32:64], r.Y().FillBytes(make([]byte, 32)))
+
+	return out, nil
 }
