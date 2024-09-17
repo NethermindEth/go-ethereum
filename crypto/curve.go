@@ -2,7 +2,6 @@ package crypto
 
 import (
 	"errors"
-	"fmt"
 	"math/big"
 
 	"github.com/NethermindEth/weierstrass"

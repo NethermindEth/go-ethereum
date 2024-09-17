@@ -1291,7 +1291,7 @@ func kZGToVersionedHash(kzg kzg4844.Commitment) common.Hash {
 
 type ecMulmuladd struct{}
 
-const ecMulmuladdInputLength = 224
+const ecMulmuladdInputLength = 288
 
 // RequiredGas returns the gas required to execute the precompiled contract
 func (c *ecMulmuladd) RequiredGas(input []byte) uint64 {

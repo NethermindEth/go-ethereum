@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,6 +58,8 @@ var allPrecompiles = map[common.Address]PrecompiledContract{
 	common.BytesToAddress([]byte{8}):    &bn256PairingIstanbul{},
 	common.BytesToAddress([]byte{9}):    &blake2F{},
 	common.BytesToAddress([]byte{0x0a}): &kzgPointEvaluation{},
+
+	common.BytesToAddress([]byte{0x01, 0x01}): &ecMulmuladd{},
 
 	common.BytesToAddress([]byte{0x0f, 0x0a}): &bls12381G1Add{},
 	common.BytesToAddress([]byte{0x0f, 0x0b}): &bls12381G1Mul{},
@@ -100,7 +103,7 @@ func testPrecompiled(addr string, test precompiledTest, t *testing.T) {
 	t.Run(fmt.Sprintf("%s-Gas=%d", test.Name, gas), func(t *testing.T) {
 		if res, _, err := RunPrecompiledContract(p, in, gas, nil); err != nil {
 			t.Error(err)
-		} else if common.Bytes2Hex(res) != test.Expected {
+		} else if common.Bytes2Hex(res) != strings.ToLower(test.Expected) {
 			t.Errorf("Expected %v, got %v", test.Expected, common.Bytes2Hex(res))
 		}
 		if expGas := test.Gas; expGas != gas {
@@ -181,7 +184,7 @@ func benchmarkPrecompiled(addr string, test precompiledTest, bench *testing.B) {
 		// Keep it as uint64, multiply 100 to get two digit float later
 		mgasps := (100 * 1000 * gasUsed) / elapsed
 		bench.ReportMetric(float64(mgasps)/100, "mgas/s")
-		//Check if it is correct
+		// Check if it is correct
 		if err != nil {
 			bench.Error(err)
 			return
@@ -396,4 +399,16 @@ func BenchmarkPrecompiledBLS12381G2MultiExpWorstCase(b *testing.B) {
 		NoBenchmark: false,
 	}
 	benchmarkPrecompiled("f0f", testcase, b)
+}
+
+func TestPrecompiledEcMulmuladd(t *testing.T) {
+	testcase := precompiledTest{
+		Input:       "ffffffff00000001000000000000000000000000ffffffffffffffffffffffffffffffff00000001000000000000000000000000fffffffffffffffffffffffc5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604bE8C49720BBBD42D812D762D129AC50DDB4DDD865BC1A3C0C5254535FC9E39C4FEFA19D691567444AC223C2E850AFEFD20A2EA7FC685757AAC03415658A8B8D479D614B057D41DF717A3445CE5640352FACBA2F8618C99DE58F9BD9081E06432AD6B315FF0BFF788010ED964D63B07C71DC244957768211545F5943B8663C2E6AACA87FCA72FD95FAA625649B7FDF1355E62E18C2A158B96101F0AEF39EAFE365173ED8B7A5208128CF9BA13AD1BE5C442D06EC526DB6F9EE54FC49466F3E8EDB",
+		Expected:    "E2BDF6E23EC4D05D7F3521FBFB5A4F3F4C13D37F4BED45A24506E7CF0D4B20DFBA6319817C41236D27EDC8F5FBB23B0480A04C3EACE98618C8DBE79C08BE0F2F",
+		Name:        "ecMulmuladd (kP + uQ) works for P-256 curve",
+		Gas:         3500,
+		NoBenchmark: true,
+	}
+
+	testPrecompiled("101", testcase, t)
 }
