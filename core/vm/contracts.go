@@ -199,7 +199,7 @@ func init() {
 	}
 
 	for k := range PrecompiledContractsR0 {
-		PrecompiledAddressesR0 = append(PrecompiledAddressesPrague, k)
+		PrecompiledAddressesR0 = append(PrecompiledAddressesR0, k)
 	}
 }
 

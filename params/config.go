@@ -160,6 +160,7 @@ var (
 		GrayGlacierBlock:              big.NewInt(0),
 		ShanghaiTime:                  newUint64(0),
 		CancunTime:                    newUint64(0),
+		R0Time:                        newUint64(0),
 		TerminalTotalDifficulty:       big.NewInt(0),
 		TerminalTotalDifficultyPassed: true,
 	}
@@ -462,7 +463,7 @@ func (c *ChainConfig) Description() string {
 	}
 
 	if c.R0Time != nil {
-		banner += fmt.Sprintf(" - R0:                          @%-10v\n", *c.R0Time)
+		banner += fmt.Sprintf(" - R0:                          @%-10v R0 test upgrade", *c.R0Time)
 	}
 
 	return banner
